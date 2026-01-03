@@ -1,0 +1,11 @@
+{
+  "output_dir": "outputs",
+  "output_format": "json",
+  "max_pages": 200,
+  "directories": [
+    {
+      "url": "https://medicosdoc.com/en/medical-directory-colombia",
+      "specialties": ["Gynecologist", "Oncologist"],
+      "procesor": "colombia_medicosdoc"
+    }
+}
