@@ -6,6 +6,7 @@
     {
       "url": "https://medicosdoc.com/en/medical-directory-colombia",
       "specialties": ["Gynecologist", "Oncologist"],
-      "procesor": "colombia_medicosdoc"
+      "provider": "medicosdoc"
     }
+  ]
 }

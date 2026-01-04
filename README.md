@@ -18,6 +18,7 @@ python3 medicosdoc_scraper.py \
   --specialty "Gynecologist" \
   --format json \
   --max-pages 2 \
+  --provider medicosdoc \
   --output gynecologists.json
 
 ### Multiple specialties via config
@@ -36,7 +37,8 @@ python3 run_from_config.py --config config.sample.json
   "directories": [
     {
       "url": "https://medicosdoc.com/en/medical-directory-colombia",
-      "specialties": ["Gynecologist", "Oncologist"]
+      "specialties": ["Gynecologist", "Oncologist"],
+      "provider": "medicosdoc"
     },
     {
       "url": "https://medicosdoc.com/en/medical-directory-mexico",
@@ -47,6 +49,13 @@ python3 run_from_config.py --config config.sample.json
 ```
 
 Outputs are written per specialty and country slug, e.g. `outputs/medical-directory-colombia-gynecologist.json`.
+
+## Extending to new directory patterns
+
+- Providers live in code as subclasses of `BaseDirectoryProvider`.
+- Implement `can_handle(url, html)`, `fetch_doctors(...)`, `doctor_specialty(...)`, and `to_record(...)`.
+- Register your provider by adding it to the `providers` list passed to `DirectoryScraper` (or include it in a factory) and optionally expose its name so configs can force it via `"provider": "<name>"` or `--provider <name>`.
+- The CLI and `run_specialties` use `DirectoryScraper`, which picks the first provider whose `can_handle` returns `True` after inspecting the initial HTML.
 ```
 
 Flags:

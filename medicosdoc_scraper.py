@@ -23,48 +23,91 @@ def _slugify(value: str) -> str:
     return "-".join(part for part in _normalize_text(value).split() if part) or "unknown"
 
 
-class MedicosDocScraper:
-    """Scrapes medicosdoc.com directory pages and filters by specialty."""
+class BaseDirectoryProvider:
+    """Abstracts fetching and shaping doctor data for a specific site."""
+
+    name: str = "base"
 
     def __init__(self, session: Optional[requests.Session] = None) -> None:
         self.session = session or requests.Session()
 
+    def can_handle(self, url: str, html: str) -> bool:
+        raise NotImplementedError
+
     def fetch_doctors(
-        self, directory_url: str, max_pages: Optional[int] = None
+        self, url: str, max_pages: Optional[int] = None, initial_html: Optional[str] = None
     ) -> Iterable[Dict[str, Any]]:
-        """Yield raw doctor entries from a directory URL."""
-        if max_pages is not None and max_pages < 1:
-            raise ValueError("max_pages must be at least 1")
-        initial_html = self._get_html(directory_url)
-        build_id, path_part, first_page = self._parse_initial_payload(
-            directory_url, initial_html
-        )
-        total_pages = int(first_page.get("totalPages", 1))
-
-        yield from first_page.get("data", [])
-
-        pages_to_fetch = total_pages if max_pages is None else min(total_pages, max_pages)
-        for page in range(2, pages_to_fetch + 1):
-            for doctor in self._fetch_page(directory_url, build_id, path_part, page):
-                yield doctor
+        raise NotImplementedError
 
     def filter_by_specialty(
         self, doctors: Iterable[Dict[str, Any]], specialty: str
     ) -> List[Dict[str, Any]]:
-        """Return doctor entries that match the given specialty."""
         target = _normalize_text(specialty)
         matches: List[Dict[str, Any]] = []
-        print("Total doctors:", len(doctors))
         for doctor in doctors:
-            specialty_name = self._doctor_specialty(doctor)
+            specialty_name = self.doctor_specialty(doctor)
             if not specialty_name:
                 continue
             if target in _normalize_text(specialty_name):
                 matches.append(doctor)
         return matches
 
+    def doctor_specialty(self, doctor: Dict[str, Any]) -> str:
+        raise NotImplementedError
+
     def to_record(self, doctor: Dict[str, Any], directory_url: str) -> Dict[str, Any]:
-        """Normalize fields for output."""
+        raise NotImplementedError
+
+    def _get_html(self, url: str) -> str:
+        response = self.session.get(url, timeout=30)
+        response.raise_for_status()
+        return response.text
+
+
+class MedicosDocProvider(BaseDirectoryProvider):
+    """Provider for medicosdoc.com Next.js directory pages."""
+
+    name = "medicosdoc"
+
+    def can_handle(self, url: str, html: str) -> bool:
+        soup = BeautifulSoup(html, "html.parser")
+        data_tag = soup.find("script", id="__NEXT_DATA__")
+        if not data_tag or not data_tag.string:
+            return False
+        try:
+            payload = json.loads(data_tag.string)
+        except json.JSONDecodeError:
+            return False
+        directory = (
+            payload.get("props", {})
+            .get("pageProps", {})
+            .get("directoryDoctors", {})
+        )
+        return bool(directory)
+
+    def fetch_doctors(
+        self, url: str, max_pages: Optional[int] = None, initial_html: Optional[str] = None
+    ) -> Iterable[Dict[str, Any]]:
+        if max_pages is not None and max_pages < 1:
+            raise ValueError("max_pages must be at least 1")
+        html = initial_html or self._get_html(url)
+        build_id, path_part, first_page = self._parse_initial_payload(url, html)
+        total_pages = int(first_page.get("totalPages", 1))
+
+        yield from first_page.get("data", [])
+
+        pages_to_fetch = total_pages if max_pages is None else min(total_pages, max_pages)
+        for page in range(2, pages_to_fetch + 1):
+            for doctor in self._fetch_page(url, build_id, path_part, page):
+                yield doctor
+
+    def doctor_specialty(self, doctor: Dict[str, Any]) -> str:
+        specialty_data = (doctor.get("SubSpecialties") or {}).get("Specialty") or {}
+        return specialty_data.get("SpecialityNameEnglish") or specialty_data.get(
+            "SpecialityName"
+        )
+
+    def to_record(self, doctor: Dict[str, Any], directory_url: str) -> Dict[str, Any]:
         head = doctor.get("Headquarters") or {}
         specialty_data = (doctor.get("SubSpecialties") or {}).get("Specialty") or {}
         specialty = (
@@ -104,11 +147,6 @@ class MedicosDocScraper:
         except KeyError as exc:
             raise RuntimeError(f"Unexpected response shape for page {page}") from exc
 
-    def _get_html(self, url: str) -> str:
-        response = self.session.get(url, timeout=30)
-        response.raise_for_status()
-        return response.text
-
     def _parse_initial_payload(
         self, directory_url: str, html: str
     ) -> Tuple[str, str, Dict[str, Any]]:
@@ -140,13 +178,6 @@ class MedicosDocScraper:
         return path or "index"
 
     @staticmethod
-    def _doctor_specialty(doctor: Dict[str, Any]) -> str:
-        specialty_data = (doctor.get("SubSpecialties") or {}).get("Specialty") or {}
-        return specialty_data.get("SpecialityNameEnglish") or specialty_data.get(
-            "SpecialityName"
-        )
-
-    @staticmethod
     def _build_name(doctor: Dict[str, Any]) -> str:
         first = (doctor.get("Name") or "").strip()
         last = (doctor.get("LastName") or "").strip()
@@ -156,6 +187,79 @@ class MedicosDocScraper:
     def _base_root(directory_url: str) -> str:
         parsed = urlparse(directory_url)
         return urlunparse((parsed.scheme, parsed.netloc, "/", "", "", ""))
+
+
+class DirectoryScraper:
+    """Coordinates provider selection and end-to-end scraping."""
+
+    def __init__(
+        self,
+        session: Optional[requests.Session] = None,
+        providers: Optional[List[BaseDirectoryProvider]] = None,
+    ) -> None:
+        session = session or requests.Session()
+        self.session = session
+        self.providers = providers or [MedicosDocProvider(session)]
+        self._active_provider: Optional[BaseDirectoryProvider] = None
+
+    def fetch_doctors(
+        self,
+        directory_url: str,
+        max_pages: Optional[int] = None,
+        provider_name: Optional[str] = None,
+    ) -> Iterable[Dict[str, Any]]:
+        html = self._get_html(directory_url)
+        provider = self._select_provider(directory_url, html, provider_name)
+        self._active_provider = provider
+        return list(
+            provider.fetch_doctors(
+                directory_url, max_pages=max_pages, initial_html=html
+            )
+        )
+
+    def filter_by_specialty(
+        self, doctors: Iterable[Dict[str, Any]], specialty: str
+    ) -> List[Dict[str, Any]]:
+        provider = self._ensure_active_provider()
+        return provider.filter_by_specialty(doctors, specialty)
+
+    def to_record(self, doctor: Dict[str, Any], directory_url: str) -> Dict[str, Any]:
+        provider = self._ensure_active_provider()
+        return provider.to_record(doctor, directory_url)
+
+    def _get_html(self, url: str) -> str:
+        response = self.session.get(url, timeout=30)
+        response.raise_for_status()
+        return response.text
+
+    def _select_provider(
+        self, url: str, html: str, provider_name: Optional[str]
+    ) -> BaseDirectoryProvider:
+        if provider_name:
+            provider = self._provider_by_name(provider_name)
+            if provider.can_handle(url, html):
+                return provider
+            raise RuntimeError(
+                f"Provider '{provider_name}' could not handle the given URL."
+            )
+
+        for provider in self.providers:
+            if provider.can_handle(url, html):
+                return provider
+        raise RuntimeError("No provider found that can handle the given URL.")
+
+    def _provider_by_name(self, name: str) -> BaseDirectoryProvider:
+        for provider in self.providers:
+            if provider.name == name:
+                return provider
+        raise RuntimeError(f"No provider registered with name '{name}'.")
+
+    def _ensure_active_provider(self) -> BaseDirectoryProvider:
+        if not self._active_provider:
+            raise RuntimeError(
+                "No active provider. Call fetch_doctors() before filtering or shaping records."
+            )
+        return self._active_provider
 
 
 def write_output(
@@ -203,10 +307,13 @@ def run_specialties(
     output_dir: Optional[str] = None,
     output_format: str = "json",
     max_pages: Optional[int] = None,
+    provider_name: Optional[str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch doctors once, then filter and write outputs per specialty."""
-    scraper = MedicosDocScraper()
-    doctors = list(scraper.fetch_doctors(url, max_pages=max_pages))
+    scraper = DirectoryScraper()
+    doctors = list(
+        scraper.fetch_doctors(url, max_pages=max_pages, provider_name=provider_name)
+    )
     records_by_specialty: Dict[str, List[Dict[str, Any]]] = {}
 
     output_path = Path(output_dir) if output_dir else None
@@ -231,7 +338,7 @@ def run_specialties(
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Scrape medicosdoc.com directories for doctors by specialty."
+        description="Scrape directory pages for doctors by specialty."
     )
     parser.add_argument(
         "--url",
@@ -257,13 +364,26 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=None,
         help="Limit number of pages to fetch (useful for quick tests).",
     )
+    parser.add_argument(
+        "--provider",
+        dest="provider_name",
+        help="Optional provider name to force (e.g. medicosdoc). Auto-detects if omitted.",
+    )
     args = parser.parse_args(argv)
 
-    scraper = MedicosDocScraper()
-    doctors = list(scraper.fetch_doctors(args.url, max_pages=args.max_pages))
+    scraper = DirectoryScraper()
+    doctors = list(
+        scraper.fetch_doctors(
+            args.url, max_pages=args.max_pages, provider_name=args.provider_name
+        )
+    )
     filtered = scraper.filter_by_specialty(doctors, args.specialty)
     records = [scraper.to_record(doc, args.url) for doc in filtered]
     write_output(records, args.output_format, args.output_path)
+
+
+# Backwards compatibility with previous name
+MedicosDocScraper = DirectoryScraper
 
 
 if __name__ == "__main__":

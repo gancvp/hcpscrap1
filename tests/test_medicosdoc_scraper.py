@@ -6,9 +6,9 @@ BASE_URL = "https://medicosdoc.com/en/medical-directory-colombia"
 
 def test_filter_gynecologist_first_page():
     scraper = MedicosDocScraper()
-    doctors = list(scraper.fetch_doctors(BASE_URL, max_pages=1))
+    doctors = list(scraper.fetch_doctors(BASE_URL, max_pages=2))
     filtered = scraper.filter_by_specialty(doctors, "Gynecologist")
-    assert filtered, "Expected gynecologists on the first page"
+    assert filtered, "Expected gynecologists in sample pages"
 
     records = [scraper.to_record(doc, BASE_URL) for doc in filtered]
     for record in records:

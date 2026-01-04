@@ -43,12 +43,14 @@ def main() -> None:
     for entry in directories:
         url = entry["url"]
         specialties = entry["specialties"]
+        provider_name = entry.get("provider")
         run_specialties(
             url=url,
             specialties=specialties,
             output_dir=output_dir,
             output_format=output_format,
             max_pages=max_pages,
+            provider_name=provider_name,
         )
 
 
